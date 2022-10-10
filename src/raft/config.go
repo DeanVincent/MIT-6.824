@@ -133,6 +133,8 @@ func (cfg *config) crash1(i int) {
 	}
 }
 
+// checkLogs
+// check command with other peer and apply command to state machine
 func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	err_msg := ""
 	v := m.Command
@@ -322,6 +324,8 @@ func (cfg *config) connect(i int) {
 			cfg.net.Enable(endname, true)
 		}
 	}
+
+	DPrintf("peer %v reconnect\n", i)
 }
 
 // detach server i from the net.
@@ -345,6 +349,8 @@ func (cfg *config) disconnect(i int) {
 			cfg.net.Enable(endname, false)
 		}
 	}
+
+	DPrintf("peer %v disconnect\n", i)
 }
 
 func (cfg *config) rpcCount(server int) int {
@@ -429,7 +435,7 @@ func (cfg *config) checkNoLeader() {
 	}
 }
 
-// how many servers think a log entry is committed?
+// nCommitted reads log entry on index of log on each server and returns how many servers think log entry is committed
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	var cmd interface{} = nil
@@ -497,8 +503,12 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
+//
+// 找到 Leader 并向其发送 cmd, 然后在两秒内不断检查是否有 expectedServers 数量的机器认为该 cmd 是 committed 的
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
+	cfg.displayLogEntries()
 	t0 := time.Now()
+	DPrintf("one(%v) starts at %v", cmd, t0)
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
@@ -530,19 +540,22 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
+						DPrintf("one(cmd %v idx %v) take %.3f s", cmd, index, time.Since(t0).Seconds())
 						return index
 					}
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.displayLogEntries()
+				cfg.t.Fatalf("one(%v) failed to reach agreement, takes %.3f s", cmd, time.Since(t0).Seconds())
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+	cfg.displayLogEntries()
+	cfg.t.Fatalf("one(%v) failed to reach agreement, takes %.3f s", cmd, time.Since(t0).Seconds())
 	return -1
 }
 
@@ -551,6 +564,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 // e.g. cfg.begin("Test (2B): RPC counts aren't too high")
 func (cfg *config) begin(description string) {
 	fmt.Printf("%s ...\n", description)
+	DPrintf("%s ...\n", description)
 	cfg.t0 = time.Now()
 	cfg.rpcs0 = cfg.rpcTotal()
 	cfg.bytes0 = cfg.bytesTotal()

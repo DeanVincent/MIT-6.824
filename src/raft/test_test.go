@@ -591,6 +591,7 @@ func TestPersist12C(t *testing.T) {
 	cfg.begin("Test (2C): basic persistence")
 
 	cfg.one(11, servers, true)
+	cfg.displayLogEntries()
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
@@ -602,6 +603,7 @@ func TestPersist12C(t *testing.T) {
 	}
 
 	cfg.one(12, servers, true)
+	cfg.displayLogEntries()
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -613,6 +615,8 @@ func TestPersist12C(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 	cfg.one(14, servers-1, true)
+	cfg.displayLogEntries()
+
 	cfg.start1(leader2, cfg.applier)
 	cfg.connect(leader2)
 
@@ -621,10 +625,13 @@ func TestPersist12C(t *testing.T) {
 	i3 := (cfg.checkOneLeader() + 1) % servers
 	cfg.disconnect(i3)
 	cfg.one(15, servers-1, true)
+	cfg.displayLogEntries()
+
 	cfg.start1(i3, cfg.applier)
 	cfg.connect(i3)
 
 	cfg.one(16, servers, true)
+	cfg.displayLogEntries()
 
 	cfg.end()
 }
@@ -715,6 +722,10 @@ func TestPersist32C(t *testing.T) {
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
 //
+// 测试Raft会议论文的图8中描述的情景.
+// 每次迭代要求Leader向日志中追加一条command.
+// Leader有很大的可能快速失败(来不及提交command), 或者很小的可能过一会儿才崩溃(已提交command)
+// 如果存活的机器不足一半,可能会启动一个新机器. 一个新的任期的Leader可能尝试去完成未提交日志的复制
 func TestFigure82C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
@@ -814,6 +825,10 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
+
+		DPrintf("iters=%d: \n", iters)
+		cfg.displayLogEntries()
+
 		leader := -1
 		for i := 0; i < servers; i++ {
 			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
@@ -1039,6 +1054,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 		// send enough to get a snapshot
 		for i := 0; i < SnapShotInterval+1; i++ {
+			cfg.displayLogEntries()
 			cfg.rafts[sender].Start(rand.Int())
 		}
 		// let applier threads catch up with the Start()'s
@@ -1049,7 +1065,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 		if disconnect {
 			// reconnect a follower, who maybe behind and
-			// needs to rceive a snapshot to catch up.
+			// needs to receive a snapshot to catch up.
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
