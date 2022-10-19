@@ -1,6 +1,8 @@
 package kvraft
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+)
 import "testing"
 import "os"
 
@@ -105,7 +107,7 @@ func (cfg *config) SnapshotSize() int {
 // attach server i to servers listed in to
 // caller must hold cfg.mu
 func (cfg *config) connectUnlocked(i int, to []int) {
-	// log.Printf("connect peer %d to %v\n", i, to)
+	//log.Printf("connect peer %d to %v\n", i, to)
 
 	// outgoing socket files
 	for j := 0; j < len(to); j++ {
@@ -174,7 +176,7 @@ func (cfg *config) ConnectAll() {
 func (cfg *config) partition(p1 []int, p2 []int) {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
-	// log.Printf("partition servers into: %v %v\n", p1, p2)
+	//log.Printf("partition servers into: %v %v\n", p1, p2)
 	for i := 0; i < len(p1); i++ {
 		cfg.disconnectUnlocked(p1[i], p2)
 		cfg.connectUnlocked(p1[i], p1)
