@@ -243,22 +243,22 @@ func (rf *Raft) tryToUpdateLeadersCommitIndex() {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	DPrintf("peer %d send AppendEntriesRPC request %v to peer %d\n", rf.me, args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	if ok {
-		DPrintf("peer %d recv reply %#v from peer %d, which args %#v\n", rf.me, reply, server, args)
-	} else {
-		DPrintf("peer %d don't recv AppendEntriesRPC reply from peer %d, which args %#v\n", rf.me, server, args)
-	}
+	//if ok {
+	//	DPrintf("peer %d recv reply %#v from peer %d, which args %#v\n", rf.me, reply, server, args)
+	//} else {
+	//	DPrintf("peer %d don't recv AppendEntriesRPC reply from peer %d, which args %#v\n", rf.me, server, args)
+	//}
 	return ok
 }
 
 func (rf *Raft) sendInstallSnapshot(receiver int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
 	DPrintf("{node %v} send InstallSnapshotRPC request %v to {node %v}\n", rf.me, args, receiver)
 	ok := rf.peers[receiver].Call("Raft.InstallSnapshot", args, reply)
-	if ok {
-		DPrintf("{node %v} recv %#v from {node %v}, which args %#v\n", rf.me, reply, receiver, args)
-	} else {
-		DPrintf("{node %v} don't recv InstallSnapshotReply from {node %v}, which args %#v\n", rf.me, receiver, args)
-	}
+	//if ok {
+	//	DPrintf("{node %v} recv %#v from {node %v}, which args %#v\n", rf.me, reply, receiver, args)
+	//} else {
+	//	DPrintf("{node %v} don't recv InstallSnapshotReply from {node %v}, which args %#v\n", rf.me, receiver, args)
+	//}
 	return ok
 }
 
@@ -328,7 +328,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for index, entry := range args.Entries {
 		relativeIndex := rf.getRelativeIndex(entry.Index)
 		if relativeIndex >= len(rf.log) || entry.Term != rf.log[relativeIndex].Term {
-			// todo: consider shrink array
 			rf.log = append(rf.log[:relativeIndex], args.Entries[index:]...)
 			rf.persist()
 			DPrintf("peer %d update log to %v\n", rf.me, rf.log)
@@ -336,6 +335,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	// 这句话不能使用 updateCommit := min(args.LeaderCommit, rf.getLastLog().Index)
+	// 因为本地日志与 leader 一致的部分只到 args.PrevLogIndex+len(args.Entries)
 	if updateCommit := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries)); updateCommit > rf.commitIndex {
 		rf.commitIndex = updateCommit
 		DPrintf("peer %d update commitIndex to %v\n", rf.me, rf.commitIndex)
@@ -369,10 +370,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lock("InstallSnapshot")
 	defer rf.unlock("InstallSnapshot")
 	defer DPrintf("{Node %d}'s state is {Term %v, commitIndex %v, lastApplied %v, firstLog %v, lastLog %v} "+
-		"before processing InstallSnapshotArgs %v and reply InstallSnapshotReply %v\n",
-		rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
+		"before processing InstallSnapshotRPC args {Term %v LeaderId %v LastIncludeIndex %v LastIncludeTerm %v} and"+
+		" reply {Term %v}",
+		rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args.Term,
+		args.LeaderId, args.LastIncludeIndex, args.LastIncludeTerm, reply.Term)
 
-	if args.Term < rf.currentTerm || args.LastIncludeIndex <= rf.getFirstLog().Index {
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		return
 	}
@@ -382,6 +385,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.voteFor = -1
 		rf.persist()
 		rf.ChangeRole(Follower)
+	}
+
+	// 过期的 Snapshot, 条件同 CondInstallSnapshot
+	if args.LastIncludeIndex <= rf.commitIndex {
+		return
 	}
 
 	go func(args *InstallSnapshotArgs) {

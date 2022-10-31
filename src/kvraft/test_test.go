@@ -42,6 +42,9 @@ func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 	start := time.Now().UnixNano()
 	v := ck.Get(key)
 	end := time.Now().UnixNano()
+	if start > end {
+		fmt.Printf("TimeReverseErr found in Get: callTime %v > returnTime %v", start, end)
+	}
 	cfg.op()
 	if log != nil {
 		log.Append(porcupine.Operation{
@@ -60,6 +63,9 @@ func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) 
 	start := time.Now().UnixNano()
 	ck.Put(key, value)
 	end := time.Now().UnixNano()
+	if start > end {
+		fmt.Printf("TimeReverseErr found in Put: callTime %v > returnTime %v", start, end)
+	}
 	cfg.op()
 	if log != nil {
 		log.Append(porcupine.Operation{
@@ -76,6 +82,9 @@ func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli in
 	start := time.Now().UnixNano()
 	ck.Append(key, value)
 	end := time.Now().UnixNano()
+	if start > end {
+		fmt.Printf("TimeReverseErr found in Append: callTime %v > returnTime %v", start, end)
+	}
 	cfg.op()
 	if log != nil {
 		log.Append(porcupine.Operation{

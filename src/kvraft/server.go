@@ -6,6 +6,9 @@
 // 快照包含的数据有: Data, CommandIds
 //
 // Raft 要求 KVServer 安装快照
+//
+// 场景一: Raft apply Snapshot(index: y) -> Raft apply Command c1(index: x)
+// 		  其中, x < y, 状态机应该识别 c1 是重复的, 通过 c1.ClerkId, c1.CommandId 与 kv.CommandIds相比较得出
 
 package kvraft
 
@@ -56,10 +59,10 @@ type ApplyResult struct {
 	Value string
 }
 
-type CommandResult struct {
+type CommandNotify struct {
 	clerkId   int64
 	commandId uint64
-	resultCh  chan *ApplyResult
+	notifyCh  chan *ApplyResult
 }
 
 type KVServer struct {
@@ -73,11 +76,17 @@ type KVServer struct {
 
 	// Your definitions here.
 
-	Data       map[string]string     // state, kv pairs
-	CommandIds map[int64]uint64      // state, latest commandId for each Clerk
-	results    map[int]CommandResult // op and result for each log index
+	Data map[string]string // state, kv pairs
+	// 不仅仅是保存最新的commandId, 还要保存响应的执行结果, 不能默认是成功的, 因为有可能执行失败了, 再次查询时需要告诉客户端这个结果
+	CommandIds map[int64]CommandAppliedRecord // state, last commandId and result for each Clerk
+	notifies   map[int]CommandNotify          // op and result for each log index
 
 	persister *raft.Persister
+}
+
+type CommandAppliedRecord struct {
+	MaxAppliedCommandId uint64       // commandId
+	Result              *ApplyResult // command applied result
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -86,19 +95,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		DPrintf("{Node %v} receives request %v and reply %v", kv.me, args, reply)
 	}()
 
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-
 	kv.mu.Lock()
-	latestCommandId, has := kv.CommandIds[args.ClerkId]
-	kv.mu.Unlock()
-	if has && latestCommandId >= args.CommandId {
+	if kv.isDuplicatedCommand(args.ClerkId, args.CommandId) {
+		kv.mu.Unlock()
 		reply.Err = ErrDoneCommandId
 		return
 	}
+	kv.mu.Unlock()
 
 	op := Op{
 		Type:      GetOp,
@@ -106,38 +109,38 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClerkId:   args.ClerkId,
 		CommandId: args.CommandId,
 	}
-	index, _, success := kv.rf.Start(op)
-	if !success {
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	result := CommandResult{
+	notify := CommandNotify{
 		clerkId:   args.ClerkId,
 		commandId: args.CommandId,
-		resultCh:  make(chan *ApplyResult, 1),
+		notifyCh:  make(chan *ApplyResult, 1),
 	}
 	kv.mu.Lock()
-	kv.results[index] = result
+	kv.notifies[index] = notify
 	kv.mu.Unlock()
 
 	select {
-	case applyResult := <-result.resultCh:
-		reply.Err, reply.Value = applyResult.Err, applyResult.Value
+	case result := <-notify.notifyCh:
+		reply.Err, reply.Value = result.Err, result.Value
 	case <-time.After(2 * time.Second):
 		reply.Err = ErrTimeout
 	}
 
 	go func() {
 		kv.mu.Lock()
-		delete(kv.results, index)
+		delete(kv.notifies, index)
 		kv.mu.Unlock()
 	}()
 
 	//for {
 	//	select {
-	//	case applyResult := <-result.resultCh:
-	//		reply.Err, reply.Value = applyResult.Err, applyResult.Value
+	//	case result := <-notify.notifyCh:
+	//		reply.Err, reply.Value = result.Err, result.Value
 	//		break
 	//	case <-time.After(time.Second):
 	//		if curTerm, _ := kv.rf.GetState(); curTerm > term {
@@ -154,19 +157,18 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("{Node %v} receives request %v and reply %v", kv.me, args, reply)
 	}()
 
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-
 	kv.mu.Lock()
-	commandId, has := kv.CommandIds[args.ClerkId]
-	kv.mu.Unlock()
-	if has && commandId >= args.CommandId {
-		reply.Err = OK
+	if kv.isDuplicatedCommand(args.ClerkId, args.CommandId) {
+		lastAppliedResult := kv.CommandIds[args.ClerkId]
+		kv.mu.Unlock()
+		if args.CommandId == lastAppliedResult.MaxAppliedCommandId {
+			reply.Err = lastAppliedResult.Result.Err
+		} else {
+			reply.Err = ErrDoneCommandId
+		}
 		return
 	}
+	kv.mu.Unlock()
 
 	var opType OpType
 	switch args.Op {
@@ -189,19 +191,18 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	DPrintf("{Node %v} receives has submit request %v", kv.me, args)
 
-	result := CommandResult{
+	result := CommandNotify{
 		clerkId:   args.ClerkId,
 		commandId: args.CommandId,
-		resultCh:  make(chan *ApplyResult, 1),
+		notifyCh:  make(chan *ApplyResult, 1),
 	}
 	kv.mu.Lock()
-	kv.results[index] = result
+	kv.notifies[index] = result
 	kv.mu.Unlock()
 
 	select {
-	case applyResult := <-result.resultCh:
+	case applyResult := <-result.notifyCh:
 		reply.Err = applyResult.Err
 	case <-time.After(2 * time.Second):
 		reply.Err = ErrTimeout
@@ -209,27 +210,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	go func() {
 		kv.mu.Lock()
-		delete(kv.results, index)
+		delete(kv.notifies, index)
 		kv.mu.Unlock()
 	}()
-
-	//for {
-	//	select {
-	//	case applyResult := <-result.resultCh:
-	//		reply.Err = applyResult.Err
-	//		break
-	//	case <-time.After(time.Second):
-	//		if curTerm, _ := kv.rf.GetState(); curTerm > term {
-	//			reply.Err = ErrWrongLeader
-	//			break
-	//		}
-	//	}
-	//}
 }
 
 func (kv *KVServer) isDuplicatedCommand(clerkId int64, commandId uint64) bool {
-	appliedCommandId, has := kv.CommandIds[clerkId]
-	return has && commandId <= appliedCommandId
+	lastAppliedCommand, has := kv.CommandIds[clerkId]
+	return has && commandId <= lastAppliedCommand.MaxAppliedCommandId
 }
 
 func (kv *KVServer) applier() {
@@ -243,50 +231,67 @@ func (kv *KVServer) applier() {
 			kv.mu.Lock()
 			// Todo: move op.Type's logic to struct StateMachine
 			if kv.isDuplicatedCommand(op.ClerkId, op.CommandId) {
+				//if op.Type == GetOp {
+				//	result.Err = ErrDoneCommandId
+				//} else {
+				//	lastAppliedResult := kv.CommandIds[op.ClerkId]
+				//	if op.CommandId == lastAppliedResult.MaxAppliedCommandId {
+				//		result.Err = lastAppliedResult.Result.Err
+				//	} else {
+				//		result.Err = ErrDoneCommandId
+				//	}
+				//}
+				DPrintf("{Node %v} doesn't apply duplicated message %v to stateMachine because"+
+					" maxAppliedCommandId is %v for Clerk %v", kv.me, msg, kv.CommandIds[op.ClerkId], op.ClerkId)
+				kv.mu.Unlock()
+				continue
+			} else {
 				if op.Type == GetOp {
-					result.Err = ErrDoneCommandId
-				} else {
-					// todo: RVServer should save lastApplyResult for each Clerk and should assign with the saved result
+					val, hasKey := kv.Data[op.Key]
+					if hasKey {
+						result.Err, result.Value = OK, val
+					} else {
+						result.Err, result.Value = ErrNoKey, ""
+					}
+				} else if op.Type == PutOp {
+					kv.Data[op.Key] = op.Value
+					result.Err = OK
+				} else if op.Type == AppendOp {
+					kv.Data[op.Key] += op.Value
 					result.Err = OK
 				}
-			} else if op.Type == GetOp {
-				val, hasKey := kv.Data[op.Key]
-				if hasKey {
-					result.Err, result.Value = OK, val
-				} else {
-					result.Err, result.Value = ErrNoKey, ""
-				}
-			} else if op.Type == PutOp {
-				kv.Data[op.Key] = op.Value
-				result.Err = OK
-			} else if op.Type == AppendOp {
-				kv.Data[op.Key] += op.Value
-				result.Err = OK
+				//DPrintf("{Node %v} applies command %v in message %v because maxAppliedCommandId is %v for Clerk %v",
+				//	kv.me, op, msg, kv.CommandIds[op.ClerkId].MaxAppliedCommandId, op.ClerkId)
+				kv.CommandIds[op.ClerkId] = CommandAppliedRecord{MaxAppliedCommandId: op.CommandId, Result: result}
 			}
-			kv.CommandIds[op.ClerkId] = op.CommandId
-			notifyResult, hasSub := kv.results[cmdIdx]
-			kv.mu.Unlock()
+			// todo: consider following implement
+			// if currentTerm, isLeader := kv.rf.GetState(); isLeader && message.CommandTerm == currentTerm {
+			//     ch := kv.getNotifyChan(message.CommandIndex)
+			//	   ch <- response
+			// }
+			notifyResult, hasSub := kv.notifies[cmdIdx]
 			if hasSub {
-				if op.ClerkId != notifyResult.clerkId || op.CommandId != notifyResult.commandId {
-					result.Err = ErrWrongLeader
-					result.Value = ""
+				if op.ClerkId == notifyResult.clerkId && op.CommandId == notifyResult.commandId {
+					notifyResult.notifyCh <- result
 				}
-				notifyResult.resultCh <- result
 			}
-			DPrintf("{Node %v} applies command %v", kv.me, op)
-			kv.mu.Lock()
-			if kv.maxRaftState > 0 && kv.persister.RaftStateSize() >= kv.maxRaftState {
-				// 进行快照
-				snapshot := kv.encodeState()
-				kv.mu.Unlock()
-				kv.rf.Snapshot(msg.CommandIndex, snapshot)
-				kv.mu.Lock()
+			curStateSize := kv.persister.RaftStateSize()
+			if kv.maxRaftState > 0 && curStateSize >= kv.maxRaftState {
+				//DPrintf("{Node %v} starts to take Snapshot as RaftStateSize %v exceeds threshold %v", kv.me,
+				//	curStateSize, kv.maxRaftState)
+				kv.takeSnapshot(msg.CommandIndex)
+				afterSize := kv.persister.RaftStateSize()
+				if afterSize > 8*kv.maxRaftState {
+					DPrintf("{Node %v} finishes taking Snapshot, size decrease %v, but RaftStateSize %v still "+
+						"exceed 8x threshold %v", kv.me, curStateSize-afterSize, afterSize, kv.maxRaftState*8)
+				}
+
 			}
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
 			if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
 				kv.mu.Lock()
-				kv.installSnapshot(msg.Snapshot)
+				kv.restoreSnapshot(msg.Snapshot)
 				kv.mu.Unlock()
 			}
 		} else {
@@ -298,8 +303,8 @@ func (kv *KVServer) applier() {
 		//	kv.mu.Lock()
 		//	val, hasKey := kv.Data[op.Key]
 		//	kv.CommandIds[op.ClerkId] = op.CommandId
-		//	result, hasSub := kv.results[cmdIdx]
-		//	delete(kv.results, cmdIdx)
+		//	result, hasSub := kv.notifies[cmdIdx]
+		//	delete(kv.notifies, cmdIdx)
 		//	kv.mu.Unlock()
 		//	if !hasSub {
 		//		continue
@@ -315,13 +320,13 @@ func (kv *KVServer) applier() {
 		//		applyResult.Err = OK
 		//		applyResult.Value = val
 		//	}
-		//	result.resultCh <- applyResult
+		//	result.notifyCh <- applyResult
 		//case PutOp:
 		//	kv.mu.Lock()
 		//	kv.Data[op.Key] = op.Value
 		//	kv.CommandIds[op.ClerkId] = op.CommandId
-		//	result, hasSub := kv.results[cmdIdx]
-		//	delete(kv.results, cmdIdx)
+		//	result, hasSub := kv.notifies[cmdIdx]
+		//	delete(kv.notifies, cmdIdx)
 		//	kv.mu.Unlock()
 		//	if !hasSub {
 		//		continue
@@ -332,13 +337,13 @@ func (kv *KVServer) applier() {
 		//	} else {
 		//		applyResult.Err = OK
 		//	}
-		//	result.resultCh <- applyResult
+		//	result.notifyCh <- applyResult
 		//case AppendOp:
 		//	kv.mu.Lock()
 		//	kv.Data[op.Key] += op.Value
 		//	kv.CommandIds[op.ClerkId] = op.CommandId
-		//	result, hasSub := kv.results[cmdIdx]
-		//	delete(kv.results, cmdIdx)
+		//	result, hasSub := kv.notifies[cmdIdx]
+		//	delete(kv.notifies, cmdIdx)
 		//	kv.mu.Unlock()
 		//	if !hasSub {
 		//		continue
@@ -349,24 +354,33 @@ func (kv *KVServer) applier() {
 		//	} else {
 		//		applyResult.Err = OK
 		//	}
-		//	result.resultCh <- applyResult
+		//	result.notifyCh <- applyResult
 		//}
 	}
 }
 
-func (kv *KVServer) encodeState() []byte {
+func (kv *KVServer) takeSnapshot(index int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.Data)
 	e.Encode(kv.CommandIds)
-	return w.Bytes()
+	kv.rf.Snapshot(index, w.Bytes())
 }
 
-func (kv *KVServer) installSnapshot(snapshot []byte) {
+func (kv *KVServer) restoreSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) == 0 {
+		return
+	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
-	d.Decode(&kv.Data)
-	d.Decode(&kv.CommandIds)
+	data := make(map[string]string)
+	commandIds := make(map[int64]CommandAppliedRecord)
+	if d.Decode(&data) != nil || d.Decode(&commandIds) != nil {
+		DPrintf("{Node %v} restores snapshot failed", kv.me)
+		return
+	}
+	kv.Data, kv.CommandIds = data, commandIds
+	DPrintf("{Node %v} restores snapshot succeed", kv.me)
 }
 
 //
@@ -417,8 +431,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxRaftState = maxRaftState
 	kv.Data = make(map[string]string)
-	kv.CommandIds = make(map[int64]uint64)
-	kv.results = make(map[int]CommandResult)
+	kv.CommandIds = make(map[int64]CommandAppliedRecord)
+	kv.notifies = make(map[int]CommandNotify)
 	kv.persister = persister
 
 	// You may need initialization code here.
@@ -427,7 +441,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.installSnapshot(persister.ReadSnapshot())
+	kv.restoreSnapshot(persister.ReadSnapshot())
 	go kv.applier()
 
 	DPrintf("{Node %v} begins to start, maxRaftState %v", kv.me, kv.maxRaftState)

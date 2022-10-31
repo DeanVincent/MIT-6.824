@@ -72,6 +72,9 @@ logs=$(find . -maxdepth 1 -name 'test-*.log' -type f -printf '.' | wc -c)
 success=$(grep -E '^PASS$' test-*.log | wc -l)
 ((failed = logs - success))
 
+waits=() # which tester PIDs are we waiting on?
+is=()    # and which iteration does each one correspond to?
+
 # Finish checks the exit status of the tester with the given PID, updates the
 # success/failed counters appropriately, and prints a pretty message.
 finish() {
@@ -83,6 +86,7 @@ finish() {
 		((failed += 1))
 	else
 		((success += 1))
+		rm -rf "test-${is[0]}.err"
 	fi
 
 	if [ "$failed" -eq 0 ]; then
@@ -97,9 +101,6 @@ finish() {
 		"$success" \
 		"$failed"
 }
-
-waits=() # which tester PIDs are we waiting on?
-is=()    # and which iteration does each one correspond to?
 
 # Cleanup is called when the process is killed.
 # It kills any remaining tests and removes their output files before exiting.

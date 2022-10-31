@@ -216,23 +216,52 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.lock("CondInstallSnapshot")
 	defer rf.unlock("CondInstallSnapshot")
+	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex %v to check whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
 
-	if lastIncludedIndex <= rf.getFirstLog().Index || lastIncludedIndex < rf.lastApplied {
+	// 有两种方案, 一种是与 lastApplied 比较, 另一种是与 commitIndex 比较
+	// 前者, 在确保状态机的状态不会回滚的情况下, 优先进行快照恢复; 后者, 在相同情况下, 使状态机优先执行本地命令
+	//
+	// 新发现, 如果在 applier 完成 applies [lastApplied+1, commitIndex] 与 update lastApplied 之间,
+	// 发生了 CondInstallSnapshot, 且恰好 lastApplied < lastIncludedIndex < commitIndex,
+	// 这会导致状态机回滚, 且 Raft applier 依旧将 lastApplied 更新成 commitIndex, 即 Raft 与 状态机出现不一致
+	// 问题的核心在于 applier 的 applying 和 update lastApplied 不是原子的, 为了避免状态机回滚, 要保证 CondInstallSnapshot 的恢复位置
+	// 不能在 lastApplied < lastIncludedIndex < commitIndex, 要在 lastIncludedIndex >= commitIndex
+	// 结论, 前者会出现问题, 不可取
+	if lastIncludedIndex <= rf.commitIndex {
+		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger",
+			rf.me, lastIncludedIndex, rf.commitIndex)
 		return false
 	}
 
-	retain := []LogEntry{{Command: 0, Index: lastIncludedIndex, Term: lastIncludedTerm}}
 	if lastIncludedIndex <= rf.getLastLog().Index && lastIncludedTerm == rf.getLog(lastIncludedIndex).Term {
-		retain = rf.log[rf.getRelativeIndex(lastIncludedIndex):rf.getRelativeIndex(rf.getLastLog().Index+1)]
+		rf.shrinkLog(lastIncludedIndex)
+	} else {
+		rf.log = []LogEntry{{Command: nil, Index: lastIncludedIndex, Term: lastIncludedTerm}}
 	}
-	copy(rf.log, retain)
-	rf.log = rf.log[:len(retain)]
 	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
 
-	rf.commitIndex = max(rf.commitIndex, lastIncludedIndex)
-	rf.lastApplied = lastIncludedIndex
+	rf.commitIndex, rf.lastApplied = lastIncludedIndex, lastIncludedIndex
 
+	DPrintf("{Node %v}'s state is {Term %v, commitIndex %v, lastApplied %v, firstLog %v, lastLog %v}"+
+		" after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.currentTerm,
+		rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
 	return true
+}
+
+func (rf *Raft) shrinkLog(retainIdx int) {
+	if retainIdx < rf.getFirstLog().Index || retainIdx > rf.getLastLog().Index {
+		return
+	}
+	retainLen := rf.getLastLog().Index - retainIdx + 1
+	shrinking := 4
+	if retainLen*shrinking < cap(rf.log) {
+		newLog := make([]LogEntry, retainLen)
+		copy(newLog, rf.log[rf.getRelativeIndex(retainIdx):])
+		rf.log = newLog
+	} else {
+		copy(rf.log, rf.log[rf.getRelativeIndex(retainIdx):])
+		rf.log = rf.log[:retainLen]
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -244,16 +273,26 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lock("Snapshot")
 	defer rf.unlock("Snapshot")
 
-	if index <= rf.getFirstLog().Index {
+	firstIndex := rf.getFirstLog().Index
+	if index <= firstIndex {
+		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger int term"+
+			" %v", rf.me, index, rf.getFirstLog().Index, rf.currentTerm)
 		return
 	}
 
-	retain := rf.log[rf.getRelativeIndex(index):rf.getRelativeIndex(rf.getLastLog().Index+1)]
-	copy(rf.log, retain)
-	rf.log = rf.log[:len(retain)]
-	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	// 有一种比较常见的场景, applier 批量地提交命令给状态机, 未及时更新 lastApplied, 这时状态机调用了 Snapshot, 那么此时 index > lastApplied,
+	// 需要及时地更新 lastApplied, 以防止 CondInstallSnapshot 的误判
+	if index > rf.lastApplied {
+		rf.lastApplied = index
+	}
 
-	DPrintf("{node %v} take new snapshot, \n", rf.me)
+	rf.shrinkLog(index)
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	// {Node 0}'s state is {Term 1, commitIndex 2592, lastApplied 2570, firstLog 2573, lastLog 2593
+	// after replacing log with snapshotIndex 2573 as old snapshotIndex 2572 is smaller
+	DPrintf("{Node %v}'s state is {Term %v, commitIndex %v, lastApplied %v, firstLog %v, lastLog %v} "+
+		"after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.currentTerm,
+		rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, firstIndex)
 }
 
 //
@@ -378,7 +417,7 @@ func (rf *Raft) applier() {
 			}
 		}
 		DPrintf("{Peer %v} applies entries %v-%v %v in term %v", rf.me, lastApplied+1, commitIndex, entries, currentTerm)
-
+		// 可能有CondInstallSnapshot将lastApplied更新为了介于oldLastApplied和commitIndex之间的值, 这使得状态机回滚
 		rf.mu.Lock()
 		// During sending ApplyMsg, the lastApplied may have been updated by the snapshot
 		rf.lastApplied = max(commitIndex, rf.lastApplied)
@@ -437,7 +476,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start applier goroutine to push committed logs into applyCh exactly once
 	go rf.applier()
 
-	//DPrintf("{Node %d} starts, which state is {Term %v, voteFor %v logs %v}\n", me, rf.currentTerm, rf.voteFor, rf.log)
+	DPrintf("{Node %d} starts, which state is {Term %v, voteFor %v, firstLog %v, lastLog %v, commitIndex %v, "+
+		"lastApplied %v}", rf.me, rf.currentTerm, rf.voteFor, rf.getFirstLog(), rf.getLastLog(), rf.commitIndex,
+		rf.lastApplied)
 
 	return rf
 }
