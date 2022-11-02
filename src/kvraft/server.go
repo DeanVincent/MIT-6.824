@@ -8,7 +8,7 @@
 // Raft 要求 KVServer 安装快照
 //
 // 场景一: Raft apply Snapshot(index: y) -> Raft apply Command c1(index: x)
-// 		  其中, x < y, 状态机应该识别 c1 是重复的, 通过 c1.ClerkId, c1.CommandId 与 kv.CommandIds相比较得出
+// 		  其中, x < y, 状态机应该识别 c1 是重复的, 通过 c1.ClerkId, c1.CmdId 与 kv.CommandIds相比较得出
 
 package kvraft
 
@@ -33,16 +33,9 @@ func DPrintf(format string, a ...interface{}) (n int) {
 	return
 }
 
-type OpType uint8
-
-const (
-	GetOp OpType = iota
-	PutOp
-	AppendOp
-)
-
+// @deprecated see Cmd in common.go
 type Op struct {
-	Type      OpType
+	Type      CmdType
 	Key       string
 	Value     string
 	ClerkId   int64
@@ -78,15 +71,72 @@ type KVServer struct {
 
 	Data map[string]string // state, kv pairs
 	// 不仅仅是保存最新的commandId, 还要保存响应的执行结果, 不能默认是成功的, 因为有可能执行失败了, 再次查询时需要告诉客户端这个结果
-	CommandIds map[int64]CommandAppliedRecord // state, last commandId and result for each Clerk
+	CommandIds map[int64]CommandAppliedRecord // state, last cmdId and result for each Clerk
 	notifies   map[int]CommandNotify          // op and result for each log index
 
 	persister *raft.Persister
 }
 
 type CommandAppliedRecord struct {
-	MaxAppliedCommandId uint64       // commandId
+	MaxAppliedCommandId uint64       // cmdId
 	Result              *ApplyResult // command applied result
+}
+
+const ExecuteTimeout = 1000 * time.Millisecond
+
+func (kv *KVServer) Cmd(args *CmdArgs, reply *CmdReply) {
+	DPrintf("{Node %v} receives request %v", kv.me, *args)
+	defer func() {
+		DPrintf("{Node %v} complete executing request %v and reply %v", kv.me, *args, *reply)
+	}()
+
+	kv.mu.Lock()
+	if kv.isDuplicatedCommand(args.ClerkId, args.CmdId) {
+		switch args.Type {
+		case CmdGet:
+			reply.Err = ErrDoneCommandId
+		case CmdPut, CmdAppend:
+			lastAppliedResult := kv.CommandIds[args.ClerkId]
+			if args.CmdId == lastAppliedResult.MaxAppliedCommandId {
+				reply.Err = lastAppliedResult.Result.Err
+			} else {
+				reply.Err = ErrDoneCommandId
+			}
+		default:
+			DPrintf("{Node %v} receives unexpected request %v", kv.me, *args)
+		}
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	index, _, isLeader := kv.rf.Start(Cmd{args})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	notify := CommandNotify{
+		clerkId:   args.ClerkId,
+		commandId: args.CmdId,
+		notifyCh:  make(chan *ApplyResult, 1),
+	}
+	kv.mu.Lock()
+	kv.notifies[index] = notify
+	kv.mu.Unlock()
+
+	select {
+	case result := <-notify.notifyCh:
+		reply.Err, reply.Value = result.Err, result.Value
+	case <-time.After(ExecuteTimeout):
+		reply.Err = ErrTimeout
+	}
+
+	go func() {
+		kv.mu.Lock()
+		delete(kv.notifies, index)
+		kv.mu.Unlock()
+	}()
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -104,7 +154,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Unlock()
 
 	op := Op{
-		Type:      GetOp,
+		Type:      CmdGet,
 		Key:       args.Key,
 		ClerkId:   args.ClerkId,
 		CommandId: args.CommandId,
@@ -136,19 +186,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		delete(kv.notifies, index)
 		kv.mu.Unlock()
 	}()
-
-	//for {
-	//	select {
-	//	case result := <-notify.notifyCh:
-	//		reply.Err, reply.Value = result.Err, result.Value
-	//		break
-	//	case <-time.After(time.Second):
-	//		if curTerm, _ := kv.rf.GetState(); curTerm > term {
-	//			reply.Err = ErrWrongLeader
-	//			break
-	//		}
-	//	}
-	//}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -170,12 +207,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	kv.mu.Unlock()
 
-	var opType OpType
+	var opType CmdType
 	switch args.Op {
-	case "Put":
-		opType = PutOp
-	case "Append":
-		opType = AppendOp
+	case "CmdPut":
+		opType = CmdPut
+	case "CmdAppend":
+		opType = CmdAppend
 	default:
 		fmt.Errorf("unknown op type %v in %v", args.Op, args)
 	}
@@ -226,43 +263,44 @@ func (kv *KVServer) applier() {
 
 		if msg.CommandValid {
 			cmdIdx := msg.CommandIndex
-			op := msg.Command.(Op)
+			cmd := msg.Command.(Cmd)
 			result := new(ApplyResult)
 			kv.mu.Lock()
-			// Todo: move op.Type's logic to struct StateMachine
-			if kv.isDuplicatedCommand(op.ClerkId, op.CommandId) {
-				//if op.Type == GetOp {
+			// Todo: move cmd.Type's logic to struct StateMachine
+			if kv.isDuplicatedCommand(cmd.ClerkId, cmd.CmdId) {
+				//if cmd.Type == CmdGet {
 				//	result.Err = ErrDoneCommandId
 				//} else {
-				//	lastAppliedResult := kv.CommandIds[op.ClerkId]
-				//	if op.CommandId == lastAppliedResult.MaxAppliedCommandId {
+				//	lastAppliedResult := kv.CommandIds[cmd.ClerkId]
+				//	if cmd.CmdId == lastAppliedResult.MaxAppliedCommandId {
 				//		result.Err = lastAppliedResult.Result.Err
 				//	} else {
 				//		result.Err = ErrDoneCommandId
 				//	}
 				//}
 				DPrintf("{Node %v} doesn't apply duplicated message %v to stateMachine because"+
-					" maxAppliedCommandId is %v for Clerk %v", kv.me, msg, kv.CommandIds[op.ClerkId], op.ClerkId)
+					" maxAppliedCommandId is %v for Clerk %v", kv.me, msg, kv.CommandIds[cmd.ClerkId], cmd.ClerkId)
 				kv.mu.Unlock()
 				continue
 			} else {
-				if op.Type == GetOp {
-					val, hasKey := kv.Data[op.Key]
+				switch cmd.Type {
+				case CmdGet:
+					val, hasKey := kv.Data[cmd.Key]
 					if hasKey {
 						result.Err, result.Value = OK, val
 					} else {
 						result.Err, result.Value = ErrNoKey, ""
 					}
-				} else if op.Type == PutOp {
-					kv.Data[op.Key] = op.Value
+				case CmdPut:
+					kv.Data[cmd.Key] = cmd.Value
 					result.Err = OK
-				} else if op.Type == AppendOp {
-					kv.Data[op.Key] += op.Value
+				case CmdAppend:
+					kv.Data[cmd.Key] += cmd.Value
 					result.Err = OK
 				}
 				//DPrintf("{Node %v} applies command %v in message %v because maxAppliedCommandId is %v for Clerk %v",
-				//	kv.me, op, msg, kv.CommandIds[op.ClerkId].MaxAppliedCommandId, op.ClerkId)
-				kv.CommandIds[op.ClerkId] = CommandAppliedRecord{MaxAppliedCommandId: op.CommandId, Result: result}
+				//	kv.me, cmd, msg, kv.CommandIds[cmd.ClerkId].MaxAppliedCommandId, cmd.ClerkId)
+				kv.CommandIds[cmd.ClerkId] = CommandAppliedRecord{MaxAppliedCommandId: cmd.CmdId, Result: result}
 			}
 			// todo: consider following implement
 			// if currentTerm, isLeader := kv.rf.GetState(); isLeader && message.CommandTerm == currentTerm {
@@ -271,7 +309,7 @@ func (kv *KVServer) applier() {
 			// }
 			notifyResult, hasSub := kv.notifies[cmdIdx]
 			if hasSub {
-				if op.ClerkId == notifyResult.clerkId && op.CommandId == notifyResult.commandId {
+				if cmd.ClerkId == notifyResult.clerkId && cmd.CmdId == notifyResult.commandId {
 					notifyResult.notifyCh <- result
 				}
 			}
@@ -298,64 +336,6 @@ func (kv *KVServer) applier() {
 			panic(fmt.Sprintf("{Node %v} apply unexpected Message %v", kv.me, msg))
 		}
 
-		//switch op.Type {
-		//case GetOp:
-		//	kv.mu.Lock()
-		//	val, hasKey := kv.Data[op.Key]
-		//	kv.CommandIds[op.ClerkId] = op.CommandId
-		//	result, hasSub := kv.notifies[cmdIdx]
-		//	delete(kv.notifies, cmdIdx)
-		//	kv.mu.Unlock()
-		//	if !hasSub {
-		//		continue
-		//	}
-		//	applyResult := new(ApplyResult)
-		//	if op.ClerkId != result.clerkId || op.CommandId != result.commandId {
-		//		applyResult.Err = ErrWrongLeader
-		//		applyResult.Value = ""
-		//	} else if !hasKey {
-		//		applyResult.Err = ErrNoKey
-		//		applyResult.Value = ""
-		//	} else {
-		//		applyResult.Err = OK
-		//		applyResult.Value = val
-		//	}
-		//	result.notifyCh <- applyResult
-		//case PutOp:
-		//	kv.mu.Lock()
-		//	kv.Data[op.Key] = op.Value
-		//	kv.CommandIds[op.ClerkId] = op.CommandId
-		//	result, hasSub := kv.notifies[cmdIdx]
-		//	delete(kv.notifies, cmdIdx)
-		//	kv.mu.Unlock()
-		//	if !hasSub {
-		//		continue
-		//	}
-		//	applyResult := new(ApplyResult)
-		//	if op.ClerkId != result.clerkId || op.CommandId != result.commandId {
-		//		applyResult.Err = ErrWrongLeader
-		//	} else {
-		//		applyResult.Err = OK
-		//	}
-		//	result.notifyCh <- applyResult
-		//case AppendOp:
-		//	kv.mu.Lock()
-		//	kv.Data[op.Key] += op.Value
-		//	kv.CommandIds[op.ClerkId] = op.CommandId
-		//	result, hasSub := kv.notifies[cmdIdx]
-		//	delete(kv.notifies, cmdIdx)
-		//	kv.mu.Unlock()
-		//	if !hasSub {
-		//		continue
-		//	}
-		//	applyResult := new(ApplyResult)
-		//	if op.ClerkId != result.clerkId || op.CommandId != result.commandId {
-		//		applyResult.Err = ErrWrongLeader
-		//	} else {
-		//		applyResult.Err = OK
-		//	}
-		//	result.notifyCh <- applyResult
-		//}
 	}
 }
 
@@ -364,6 +344,7 @@ func (kv *KVServer) takeSnapshot(index int) {
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.Data)
 	e.Encode(kv.CommandIds)
+	//DPrintf("takeSnapshot data %v commandIds %v", kv.Data, kv.CommandIds)
 	kv.rf.Snapshot(index, w.Bytes())
 }
 
@@ -421,11 +402,13 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxRaftState int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	labgob.Register(Cmd{})
 	labgob.Register(PutAppendArgs{})
 	labgob.Register(PutAppendReply{})
 	labgob.Register(GetArgs{})
 	labgob.Register(GetReply{})
+	labgob.Register(CmdArgs{})
+	labgob.Register(CmdReply{})
 
 	kv := new(KVServer)
 	kv.me = me

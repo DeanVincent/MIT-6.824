@@ -1,6 +1,7 @@
 package porcupine
 
 import (
+	"fmt"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,9 @@ func makeEntries(history []Operation) []entry {
 	var entries []entry = nil
 	id := 0
 	for _, elem := range history {
+		if elem.Call > elem.Return {
+			fmt.Printf("TimeReverseErr found in makeEntries: callTime %v > returnTime %v", elem.Call, elem.Return)
+		}
 		entries = append(entries, entry{
 			callEntry, elem.Input, id, elem.Call, elem.ClientId})
 		entries = append(entries, entry{
@@ -177,7 +181,7 @@ func unlift(entry *node) {
 }
 
 func checkSingle(model Model, history []entry, computePartial bool, kill *int32) (bool, []*[]int) {
-	entry := makeLinkedEntries(history)
+	entry := makeLinkedEntries(history) // 用链表的原因是, 方便插入和删除
 	n := length(entry) / 2
 	linearized := newBitset(uint(n))
 	cache := make(map[uint64][]cacheEntry) // map from hash to cache entry
@@ -188,22 +192,24 @@ func checkSingle(model Model, history []entry, computePartial bool, kill *int32)
 	state := model.Init()
 	headEntry := insertBefore(&node{value: nil, match: nil, id: -1}, entry)
 	for headEntry.next != nil {
-		if atomic.LoadInt32(kill) != 0 {
+		if atomic.LoadInt32(kill) != 0 { // 因为 checkParallel 有两个修改 kill 的条件均不满足, 所以不是从这里返回的
 			return false, longest
 		}
-		if entry.match != nil {
-			matching := entry.match // the return entry
-			ok, newState := model.Step(state, entry.value, matching.value)
+		if entry.match != nil { // callEntry
+			matching := entry.match                                        // the return entry
+			ok, newState := model.Step(state, entry.value, matching.value) // state, input, output
 			if ok {
 				newLinearized := linearized.clone().set(uint(entry.id))
-				newCacheEntry := cacheEntry{newLinearized, newState}
-				if !cacheContains(model, cache, newCacheEntry) {
+				newCacheEntry := cacheEntry{newLinearized, newState} // 所有执行过的命令, 命令执行后状态
+				// cache 记录所有过程中的所有状态
+				if !cacheContains(model, cache, newCacheEntry) { // 状态集中是否包含新的状态
 					hash := newLinearized.hash()
 					cache[hash] = append(cache[hash], newCacheEntry)
+					// calls 记录所有 CallEntry 和执行前的状态
 					calls = append(calls, callsEntry{entry, state})
 					state = newState
 					linearized.set(uint(entry.id))
-					lift(entry)
+					lift(entry) // 将 entry 和 对应的 returnEntry 从链表摘除
 					entry = headEntry.next
 				} else {
 					entry = entry.next
@@ -211,8 +217,8 @@ func checkSingle(model Model, history []entry, computePartial bool, kill *int32)
 			} else {
 				entry = entry.next
 			}
-		} else {
-			if len(calls) == 0 {
+		} else { // returnEntry
+			if len(calls) == 0 { // 排除了另一个 return false 的可能性, 所以确定是从这里返回的
 				return false, longest
 			}
 			// longest
@@ -296,7 +302,7 @@ loop:
 			count++
 			ok = ok && result
 			if !ok && !computeInfo {
-				atomic.StoreInt32(&kill, 1)
+				atomic.StoreInt32(&kill, 1) // computeInfo 为 true, 不可能进入这里
 				break loop
 			}
 			if count >= len(history) {
@@ -304,8 +310,8 @@ loop:
 			}
 		case <-timeoutChan:
 			timedOut = true
-			atomic.StoreInt32(&kill, 1)
-			break loop // if we time out, we might get a false positive
+			atomic.StoreInt32(&kill, 1) // 返回值为 Illegal, 而非 Unknown, 未进入这里
+			break loop                  // if we time out, we might get a false positive
 		}
 	}
 	var info linearizationInfo
@@ -339,7 +345,7 @@ loop:
 		info.history = history
 		info.partialLinearizations = partialLinearizations
 	}
-	var result CheckResult
+	var result CheckResult // = Illegal
 	if !ok {
 		result = Illegal
 	} else {

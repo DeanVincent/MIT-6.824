@@ -43,7 +43,8 @@ func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 	v := ck.Get(key)
 	end := time.Now().UnixNano()
 	if start > end {
-		fmt.Printf("TimeReverseErr found in Get: callTime %v > returnTime %v", start, end)
+		fmt.Printf("Unmonotonic time found, rpc callTime %v > returnTime %v, set returnTime to callTime", start, end)
+		end = start
 	}
 	cfg.op()
 	if log != nil {
@@ -64,7 +65,8 @@ func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) 
 	ck.Put(key, value)
 	end := time.Now().UnixNano()
 	if start > end {
-		fmt.Printf("TimeReverseErr found in Put: callTime %v > returnTime %v", start, end)
+		fmt.Printf("Unmonotonic time found, rpc callTime %v > returnTime %v, set returnTime to callTime", start, end)
+		end = start
 	}
 	cfg.op()
 	if log != nil {
@@ -83,7 +85,8 @@ func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli in
 	ck.Append(key, value)
 	end := time.Now().UnixNano()
 	if start > end {
-		fmt.Printf("TimeReverseErr found in Append: callTime %v > returnTime %v", start, end)
+		fmt.Printf("Unmonotonic time found, rpc callTime %v > returnTime %v, set returnTime to callTime", start, end)
+		end = start
 	}
 	cfg.op()
 	if log != nil {

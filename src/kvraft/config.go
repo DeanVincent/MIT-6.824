@@ -264,7 +264,7 @@ func (cfg *config) ShutdownServer(i int) {
 	// it's important to do this before creating
 	// the new Persister in saved[i], to avoid
 	// the possibility of the server returning a
-	// positive reply to an Append but persisting
+	// positive reply to an CmdAppend but persisting
 	// the result in the superseded Persister.
 	cfg.net.DeleteServer(i)
 
@@ -400,6 +400,7 @@ func (cfg *config) rpcTotal() int {
 // e.g. cfg.begin("Test (2B): RPC counts aren't too high")
 func (cfg *config) begin(description string) {
 	fmt.Printf("%s ...\n", description)
+	DPrintf("%s ...\n", description)
 	cfg.t0 = time.Now()
 	cfg.rpcs0 = cfg.rpcTotal()
 	atomic.StoreInt32(&cfg.ops, 0)
