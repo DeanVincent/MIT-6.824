@@ -1,13 +1,16 @@
 package porcupine
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type Operation struct {
 	ClientId int // optional, unless you want a visualization; zero-indexed
 	Input    interface{}
-	Call     int64 // invocation time
+	Call     time.Time // invocation time
 	Output   interface{}
-	Return   int64 // response time
+	Return   time.Time // response time
 }
 
 type EventKind bool

@@ -39,10 +39,10 @@ func (log *OpLog) Read() []porcupine.Operation {
 
 // get/put/putappend that keep counts
 func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
-	start := time.Now().UnixNano()
+	start := time.Now()
 	v := ck.Get(key)
-	end := time.Now().UnixNano()
-	if start > end {
+	end := time.Now()
+	if start.After(end) {
 		fmt.Printf("Unmonotonic time found, rpc callTime %v > returnTime %v, set returnTime to callTime", start, end)
 		end = start
 	}
@@ -61,10 +61,10 @@ func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 }
 
 func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
-	start := time.Now().UnixNano()
+	start := time.Now()
 	ck.Put(key, value)
-	end := time.Now().UnixNano()
-	if start > end {
+	end := time.Now()
+	if start.After(end) {
 		fmt.Printf("Unmonotonic time found, rpc callTime %v > returnTime %v, set returnTime to callTime", start, end)
 		end = start
 	}
@@ -81,10 +81,10 @@ func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) 
 }
 
 func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
-	start := time.Now().UnixNano()
+	start := time.Now()
 	ck.Append(key, value)
-	end := time.Now().UnixNano()
-	if start > end {
+	end := time.Now()
+	if start.After(end) {
 		fmt.Printf("Unmonotonic time found, rpc callTime %v > returnTime %v, set returnTime to callTime", start, end)
 		end = start
 	}

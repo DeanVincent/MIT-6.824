@@ -43,10 +43,10 @@ func computeVisualizationData(model Model, info linearizationInfo) visualization
 			switch elem.kind {
 			case callEntry:
 				history[elem.id].ClientId = elem.clientId
-				history[elem.id].Start = elem.time
+				history[elem.id].Start = elem.time.UnixNano()
 				callValue[elem.id] = elem.value
 			case returnEntry:
-				history[elem.id].End = elem.time
+				history[elem.id].End = elem.time.UnixNano()
 				history[elem.id].Description = model.DescribeOperation(callValue[elem.id], elem.value)
 				returnValue[elem.id] = elem.value
 			}

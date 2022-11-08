@@ -1,7 +1,6 @@
 package porcupine
 
 import (
-	"fmt"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -18,7 +17,7 @@ type entry struct {
 	kind     entryKind
 	value    interface{}
 	id       int
-	time     int64
+	time     time.Time
 	clientId int
 }
 
@@ -38,8 +37,8 @@ func (a byTime) Swap(i, j int) {
 }
 
 func (a byTime) Less(i, j int) bool {
-	if a[i].time != a[j].time {
-		return a[i].time < a[j].time
+	if !a[i].time.Equal(a[j].time) {
+		return a[i].time.Before(a[j].time)
 	}
 	// if the timestamps are the same, we need to make sure we order calls
 	// before returns
@@ -50,9 +49,6 @@ func makeEntries(history []Operation) []entry {
 	var entries []entry = nil
 	id := 0
 	for _, elem := range history {
-		if elem.Call > elem.Return {
-			fmt.Printf("TimeReverseErr found in makeEntries: callTime %v > returnTime %v", elem.Call, elem.Return)
-		}
 		entries = append(entries, entry{
 			callEntry, elem.Input, id, elem.Call, elem.ClientId})
 		entries = append(entries, entry{
@@ -111,13 +107,14 @@ func renumber(events []Event) []Event {
 
 func convertEntries(events []Event) []entry {
 	var entries []entry
-	for i, elem := range events {
+	for _, elem := range events {
 		kind := callEntry
 		if elem.Kind == ReturnEvent {
 			kind = returnEntry
 		}
-		// use index as "time"
-		entries = append(entries, entry{kind, elem.Value, elem.Id, int64(i), elem.ClientId})
+		// deprecated: use index as "time"
+		// use time.Now() as "time", as entry.time is unused
+		entries = append(entries, entry{kind, elem.Value, elem.Id, time.Now(), elem.ClientId})
 	}
 	return entries
 }
