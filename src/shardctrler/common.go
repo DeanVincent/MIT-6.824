@@ -28,46 +28,107 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func makeConfig(num int) *Config {
+	config := new(Config)
+	config.Num = num
+	config.Groups = map[int][]string{}
+	for i := 1; i < len(config.Shards); i++ {
+		config.Shards[i] = i
+	}
+	return config
+}
+
 const (
-	OK = "OK"
+	OK                = "OK"
+	ErrWrongLeader    = "ErrWrongLeader"
+	ErrTimeout        = "ErrTimeout"
+	ErrUnexpectedType = "ErrUnexpectedType"
+	ErrNoGroup        = "ErrNoGroup"
+	ErrGroupExisted   = "ErrGroupExisted"
 )
 
 type Err string
 
 type JoinArgs struct {
+	ClerkId int64
+	CmdId   int64
 	Servers map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
-	WrongLeader bool
-	Err         Err
+	Err Err
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	ClerkId int64
+	CmdId   int64
+	GIDs    []int
 }
 
 type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
+	Err Err
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	ClerkId int64
+	CmdId   int64
+	Shard   int
+	GID     int
 }
 
 type MoveReply struct {
-	WrongLeader bool
-	Err         Err
+	Err Err
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	ClerkId int64
+	CmdId   int64
+	Num     int // desired config number
 }
 
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	Err    Err
+	Config Config
+}
+
+type CmdArgs struct {
+	Type    CmdType
+	ClerkId int64
+	CmdId   int64
+	Servers map[int][]string // new GID -> servers mappings
+	GIDs    []int
+	Shard   int
+	Num     int // desired config number
+}
+
+type CmdReply struct {
+	Err    Err
+	Config Config
+}
+
+type Cmd struct {
+	*CmdArgs
+}
+
+type CmdType uint8
+
+const (
+	CmdQuery CmdType = iota
+	CmdJoin
+	CmdLeave
+	CmdMove
+)
+
+func (t CmdType) toString() string {
+	switch t {
+	case CmdQuery:
+		return "Query"
+	case CmdJoin:
+		return "Join"
+	case CmdLeave:
+		return "Leave"
+	case CmdMove:
+		return "Move"
+	}
+	return ""
 }
