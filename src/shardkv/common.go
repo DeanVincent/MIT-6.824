@@ -1,5 +1,7 @@
 package shardkv
 
+import "6.824/shardctrler"
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running Raft.
@@ -10,35 +12,66 @@ package shardkv
 //
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK                 = "OK"
+	ErrNoKey           = "ErrNoKey"
+	ErrWrongCmdId      = "ErrWrongCmdId"
+	ErrWrongGroup      = "ErrWrongGroup"
+	ErrWrongLeader     = "ErrWrongLeader"
+	ErrTimeOut         = "ErrTimeOut"
+	ErrWrongConfigNum  = "ErrWrongConfigNum"
+	ErrWrongShardState = "ErrWrongShardState"
 )
 
 type Err string
 
-// Put or Append
-type PutAppendArgs struct {
-	// You'll have to add definitions here.
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+type OpRequest struct {
+	Type    OpType
+	Key     string
+	Value   string
+	ClerkId int64
+	CmdId   int64
 }
 
-type PutAppendReply struct {
+type OpResponse struct {
+	Err   Err
+	Value string
+}
+
+type PullShardRequest struct {
+	ConfigNum int
+	ShardId   int
+}
+
+type PullShardResponse struct {
+	Err         Err
+	KVs         map[string]string
+	LastApplied map[int64]*OpReqWithResp
+}
+
+type InsertShardRequest struct {
+	ConfigNum   int
+	ShardId     int
+	KVs         map[string]string
+	LastApplied map[int64]*OpReqWithResp
+}
+
+type InsertShardResponse struct {
 	Err Err
 }
 
-type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+type DeleteShardRequest struct {
+	ConfigNum int
+	ShardId   int
 }
 
-type GetReply struct {
-	Err   Err
-	Value string
+type DeleteShardResponse struct {
+	Err Err
+}
+
+type UpdateConfigRequest struct {
+	Config *shardctrler.Config
+}
+
+type UpdateConfigResponse struct {
+	Err Err
 }

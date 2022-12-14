@@ -4,7 +4,7 @@ import "log"
 
 // Debugging
 const Trace = false
-const Debug = true
+const Debug = false
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)

@@ -46,6 +46,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -144,6 +145,10 @@ func (rf *Raft) getAbsoluteIndex(relativeIndex int) int {
 	return relativeIndex + rf.log[0].Index
 }
 
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
 func ProduceEventToChannel(ch chan time.Time) {
 	for {
 		select {
@@ -208,10 +213,10 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastApplied = rf.getFirstLog().Index
 }
 
-//
+// CondInstallSnapshot
+// 保证在不会造成状态机的回退的前提下, 保存快照并剪切 Raft 日志
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
-//
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	// Your code here (2D).
 	rf.lock("CondInstallSnapshot")
@@ -262,6 +267,8 @@ func (rf *Raft) shrinkLog(retainIdx int) {
 		copy(rf.log, rf.log[rf.getRelativeIndex(retainIdx):])
 		rf.log = rf.log[:retainLen]
 	}
+	// 可有可无, 为了通过Lab4-TestChallenge1Delete
+	rf.log[0].Command = nil
 }
 
 // the service says it has created a snapshot that has
@@ -414,6 +421,7 @@ func (rf *Raft) applier() {
 				CommandValid: true,
 				Command:      entry.Command,
 				CommandIndex: entry.Index,
+				CommandTerm:  entry.Term,
 			}
 		}
 		DPrintf("{Peer %v} applies entries %v-%v %v in term %v", rf.me, lastApplied+1, commitIndex, entries, currentTerm)
@@ -458,6 +466,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	DPrintf("{Node %d} starts, which state is {Term %v, voteFor %v, firstLog %v, lastLog %v, commitIndex %v, "+
+		"lastApplied %v}", rf.me, rf.currentTerm, rf.voteFor, rf.getFirstLog(), rf.getLastLog(), rf.commitIndex,
+		rf.lastApplied)
+
 	rf.heartbeatCond = sync.NewCond(&rf.mu)
 	rf.applyCond = sync.NewCond(&rf.mu)
 	lastLog := rf.getLastLog()
@@ -475,10 +488,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.scheduleHeartbeat()
 	// start applier goroutine to push committed logs into applyCh exactly once
 	go rf.applier()
-
-	DPrintf("{Node %d} starts, which state is {Term %v, voteFor %v, firstLog %v, lastLog %v, commitIndex %v, "+
-		"lastApplied %v}", rf.me, rf.currentTerm, rf.voteFor, rf.getFirstLog(), rf.getLastLog(), rf.commitIndex,
-		rf.lastApplied)
 
 	return rf
 }

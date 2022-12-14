@@ -1,4 +1,4 @@
-package shardctrler
+package shardkv
 
 import "log"
 

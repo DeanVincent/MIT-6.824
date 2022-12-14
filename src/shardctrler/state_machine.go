@@ -18,8 +18,15 @@ func newMemoryCtrler(me int) *memoryCtrler {
 		me:      me,
 		configs: make([]*Config, 1),
 	}
-	sm.configs[0] = &Config{Groups: map[int][]string{}}
+	sm.configs[0] = NewDefaultConfig()
 	return sm
+}
+
+func NewDefaultConfig() *Config {
+	return &Config{
+		Num:    0,
+		Groups: map[int][]string{},
+	}
 }
 
 func (c *memoryCtrler) exec(cmd Cmd) (*Config, Err) {
@@ -37,7 +44,7 @@ func (c *memoryCtrler) exec(cmd Cmd) (*Config, Err) {
 }
 
 func (c *memoryCtrler) query(num int) (*Config, Err) {
-	if num == -1 || num > len(c.configs) {
+	if num == -1 || num >= len(c.configs) {
 		num = len(c.configs) - 1
 	}
 	config := c.copyConfig(num)

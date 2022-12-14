@@ -40,6 +40,9 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId int64
+	cmdId   int64
+	leaders map[int]int // gid -> [srv idx]
 }
 
 //
@@ -56,7 +59,54 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clerkId = nrand()
+	ck.cmdId = 1
+	ck.leaders = map[int]int{}
 	return ck
+}
+
+func (ck *Clerk) op(opType OpType, key, value string) string {
+	req := &OpRequest{
+		Type:    opType,
+		Key:     key,
+		Value:   value,
+		ClerkId: ck.clerkId,
+		CmdId:   ck.cmdId,
+	}
+	ck.cmdId++
+	resp := new(OpResponse)
+
+	for {
+		gid := ck.config.Shards[key2shard(key)]
+		if _, has := ck.leaders[gid]; !has {
+			ck.leaders[gid] = 0
+		}
+		if srvs, ok := ck.config.Groups[gid]; ok {
+			// try each server for the shard.
+			for si := 0; si < len(srvs); si++ {
+				srv := ck.make_end(srvs[ck.leaders[gid]])
+				ok := srv.Call("ShardKV.Op", req, resp)
+				DPrintf("{Clerk %v} send OpRequest %v to {Node %v}{Group %v} and receives %v OpResponse %v, "+
+					"config %v", ck.clerkId, *req, si, gid, ok, *resp, ck.config)
+				if ok && (resp.Err == OK || resp.Err == ErrNoKey) {
+					return resp.Value
+				}
+				if ok && resp.Err == ErrWrongGroup {
+					break
+				}
+				//if ok && resp.Err == ErrWrongCmdId {
+				//	req.CmdId = ck.cmdId
+				//	ck.cmdId++
+				//}
+				// ... not ok, or ErrWrongLeader or ErrTimeOut
+				ck.leaders[gid] = (ck.leaders[gid] + 1) % len(srvs)
+				resp.Err = ""
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		// ask controler for the latest configuration.
+		ck.config = ck.sm.Query(-1)
+	}
 }
 
 //
@@ -66,72 +116,45 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
+	return ck.op(OpGet, key, "")
+}
 
-	for {
-		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
-		if servers, ok := ck.config.Groups[gid]; ok {
-			// try each server for the shard.
-			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
-				var reply GetReply
-				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
-				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
-		ck.config = ck.sm.Query(-1)
-	}
-
-	return ""
+func (ck *Clerk) Put(key string, value string) {
+	ck.op(OpPut, key, value)
+}
+func (ck *Clerk) Append(key string, value string) {
+	ck.op(OpAppend, key, value)
 }
 
 //
 // shared by Put and Append.
 // You will have to modify this function.
 //
-func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
-
-
-	for {
-		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
-		if servers, ok := ck.config.Groups[gid]; ok {
-			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
-				var reply PutAppendReply
-				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
-					return
-				}
-				if ok && reply.Err == ErrWrongGroup {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
-		ck.config = ck.sm.Query(-1)
-	}
-}
-
-func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
-}
-func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
-}
+//func (ck *Clerk) PutAppend(key string, value string, op string) {
+//	args := PutAppendArgs{}
+//	args.Key = key
+//	args.Value = value
+//	args.Op = op
+//
+//	for {
+//		shard := key2shard(key)
+//		gid := ck.config.Shards[shard]
+//		if servers, ok := ck.config.Groups[gid]; ok {
+//			for si := 0; si < len(servers); si++ {
+//				srv := ck.make_end(servers[si])
+//				var reply PutAppendReply
+//				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+//				if ok && reply.Err == OK {
+//					return
+//				}
+//				if ok && reply.Err == ErrWrongGroup {
+//					break
+//				}
+//				// ... not ok, or ErrWrongLeader
+//			}
+//		}
+//		time.Sleep(100 * time.Millisecond)
+//		// ask controler for the latest configuration.
+//		ck.config = ck.sm.Query(-1)
+//	}
+//}
