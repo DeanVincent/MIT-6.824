@@ -168,6 +168,12 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.role == Leader
 }
 
+func (rf *Raft) HasEntryInCurrentTerm() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.getLastLog().Term == rf.currentTerm
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.

@@ -302,6 +302,8 @@ func (kv *ShardKV) updateConfigAction() {
 	kv.mu.Lock()
 	for _, shard := range kv.shards {
 		if shard.State != Serving {
+			DPrintf("{Node %v}{Group %v} stop updateConfigAction, as there is unserving shard, state %v",
+				kv.me, kv.gid, kv.getStateString())
 			kv.mu.Unlock()
 			return
 		}
@@ -310,6 +312,8 @@ func (kv *ShardKV) updateConfigAction() {
 	kv.mu.Unlock()
 	newConfig := ck.Query(expectConfigNum)
 	if newConfig.Num != expectConfigNum {
+		DPrintf("{Node %v}{Group %v} stop updateConfigAction, as there is no config with expect config num %v"+
+			"return config %v", kv.me, kv.gid, expectConfigNum, newConfig)
 		return
 	}
 	kv.propose(&SMRequest{
@@ -394,6 +398,13 @@ func (kv *ShardKV) deleteShardAction() {
 	DPrintf("{Node %v}{Group %v} finish deleteShardAction", kv.me, kv.gid)
 }
 
+func (kv *ShardKV) proposeEmptyEntry() {
+	if kv.rf.HasEntryInCurrentTerm() {
+		return
+	}
+	kv.propose(&SMRequest{RequestType: ReqEmpty})
+}
+
 func (kv *ShardKV) isDupOp(op *OpRequest) bool {
 	opReqWithResp, hasApplied := kv.lastApplied[op.ClerkId]
 	return hasApplied && op.CmdId <= opReqWithResp.Req.CmdId
@@ -447,7 +458,7 @@ func (kv *ShardKV) propose(req *SMRequest) *SMResponse {
 		resp.Err = ErrWrongLeader
 		return resp
 	}
-	DPrintf("{Node %v}{Group %v} Raft size %v after propose %v", kv.me, kv.gid, kv.rf.GetRaftStateSize(), len(dAtA))
+	//DPrintf("{Node %v}{Group %v} Raft size %v after propose %v", kv.me, kv.gid, kv.rf.GetRaftStateSize(), len(dAtA))
 	kv.mu.Lock()
 	notice := kv.getOrCreateNotice(idx, term)
 	kv.mu.Unlock()
@@ -487,10 +498,12 @@ func (kv *ShardKV) restoreSnapshot(snapshot []byte) { // todo
 		dec.Decode(lastConfig) != nil ||
 		dec.Decode(&shards) != nil ||
 		dec.Decode(&lastApplied) != nil {
-		DPrintf("{Node %v} restores snapshot failed", kv.me)
+		DPrintf("{Node %v}{Group %v} restores snapshot failed", kv.me, kv.gid)
 		return
 	}
 	kv.currentConfig, kv.lastConfig, kv.shards, kv.lastApplied = currentConfig, lastConfig, shards, lastApplied
+
+	DPrintf("{Node %v}{Group %v} restores snapshot success, state %v", kv.me, kv.gid, kv.getStateString())
 }
 
 //
@@ -584,6 +597,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.monitor(kv.updateConfigAction, TimeoutUpdateConfig)
 	go kv.monitor(kv.pullShardAction, TimeoutPullShard)
 	go kv.monitor(kv.deleteShardAction, TimeoutDeleteShard)
+	go kv.monitor(kv.proposeEmptyEntry, TimeoutProposeEmpty)
 
 	return kv
 }
@@ -608,7 +622,8 @@ type SMRequest struct {
 type RequestType uint8
 
 const (
-	ReqOp = iota
+	ReqEmpty = iota
+	ReqOp
 	ReqPullShard
 	ReqInsertShard
 	ReqDeleteShard
@@ -706,4 +721,5 @@ const (
 	TimeoutUpdateConfig = 50 * time.Millisecond
 	TimeoutPullShard    = 50 * time.Millisecond
 	TimeoutDeleteShard  = 50 * time.Millisecond
+	TimeoutProposeEmpty = 100 * time.Millisecond
 )
