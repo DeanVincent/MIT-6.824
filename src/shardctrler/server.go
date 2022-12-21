@@ -21,7 +21,7 @@ type ShardCtrler struct {
 
 	stateMachine ctrlerStateMachine
 	history      map[int64]*CmdResult
-	notices      map[int]notice
+	notifyChs    map[noticeKey]chan *CmdResult
 }
 
 type CmdResult struct {
@@ -30,13 +30,12 @@ type CmdResult struct {
 	Config *Config
 }
 
-type notice struct {
-	clerkId int64
-	cmdId   int64
-	ch      chan *CmdResult
+type noticeKey struct {
+	idx  int
+	term int
 }
 
-const ExecuteTimeout = 1000 * time.Millisecond
+const ExecuteTimeout = 500 * time.Millisecond
 
 func (sc *ShardCtrler) Cmd(args *CmdArgs, reply *CmdReply) {
 	DPrintf("{Node %v} start to handle request %v", sc.me, *args)
@@ -57,23 +56,19 @@ func (sc *ShardCtrler) Cmd(args *CmdArgs, reply *CmdReply) {
 	}
 	sc.mu.Unlock()
 
-	idx, _, isLeader := sc.rf.Start(Cmd{args})
+	idx, term, isLeader := sc.rf.Start(Cmd{args})
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	notice := notice{
-		clerkId: args.ClerkId,
-		cmdId:   args.CmdId,
-		ch:      make(chan *CmdResult),
-	}
+	key := noticeKey{idx: idx, term: term}
 	sc.mu.Lock()
-	sc.notices[idx] = notice
+	ch := sc.getOrCreateNotice(key)
 	sc.mu.Unlock()
 
 	select {
-	case result := <-notice.ch:
+	case result := <-ch:
 		reply.Err = result.Err
 		if result.Config != nil {
 			reply.Config = *result.Config
@@ -84,7 +79,7 @@ func (sc *ShardCtrler) Cmd(args *CmdArgs, reply *CmdReply) {
 
 	go func() {
 		sc.mu.Lock()
-		delete(sc.notices, idx)
+		sc.deleteNotice(key)
 		sc.mu.Unlock()
 	}()
 }
@@ -107,7 +102,7 @@ func (sc *ShardCtrler) applier() {
 			result.Config, result.Err = sc.stateMachine.exec(cmd)
 			DPrintf("{Node %v} applies command in message %v", sc.me, msg)
 			sc.history[cmd.ClerkId] = result
-			sc.maybeNotify(msg.CommandIndex, cmd, result)
+			sc.maybeNotify(msg.CommandIndex, msg.CommandTerm, result)
 			// no need to take snapshot
 			sc.mu.Unlock()
 		} else if msg.SnapshotValid {
@@ -123,11 +118,24 @@ func (sc *ShardCtrler) isDupCmd(clerkId, cmdId int64) bool {
 	return has && cmdId <= appliedCmd.Id
 }
 
-func (sc *ShardCtrler) maybeNotify(idx int, cmd Cmd, result *CmdResult) {
-	notice, has := sc.notices[idx]
-	if has && cmd.ClerkId == notice.clerkId && cmd.CmdId == notice.cmdId {
-		notice.ch <- result
+func (sc *ShardCtrler) maybeNotify(cmdIdx int, cmdTerm int, result *CmdResult) {
+	if currentTerm, isLeader := sc.rf.GetState(); isLeader && cmdTerm == currentTerm {
+		ch := sc.getOrCreateNotice(noticeKey{idx: cmdIdx, term: cmdTerm})
+		ch <- result
 	}
+}
+
+func (sc *ShardCtrler) getOrCreateNotice(key noticeKey) chan *CmdResult {
+	ch, hasKey := sc.notifyChs[key]
+	if !hasKey {
+		ch = make(chan *CmdResult, 1)
+		sc.notifyChs[key] = ch
+	}
+	return ch
+}
+
+func (sc *ShardCtrler) deleteNotice(key noticeKey) {
+	delete(sc.notifyChs, key)
 }
 
 //
@@ -169,7 +177,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	// Your code here.
 	sc.stateMachine = newMemoryCtrler(me)
 	sc.history = make(map[int64]*CmdResult)
-	sc.notices = make(map[int]notice)
+	sc.notifyChs = make(map[noticeKey]chan *CmdResult)
 
 	go sc.applier()
 

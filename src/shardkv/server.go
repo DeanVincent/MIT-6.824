@@ -310,6 +310,7 @@ func (kv *ShardKV) updateConfigAction() {
 	}
 	expectConfigNum := kv.currentConfig.Num + 1
 	kv.mu.Unlock()
+	DPrintf("{Node %v}{Group %v} updateConfigAction start query by clerkId %v", kv.me, kv.gid, ck.GetClerkId())
 	newConfig := ck.Query(expectConfigNum)
 	if newConfig.Num != expectConfigNum {
 		DPrintf("{Node %v}{Group %v} stop updateConfigAction, as there is no config with expect config num %v"+
@@ -333,15 +334,15 @@ func (kv *ShardKV) pullShardAction() {
 		wg.Add(1)
 		gid := kv.lastConfig.Shards[shardId]
 		servers := kv.lastConfig.Groups[gid]
-		go func(configNum, shardId int, servers []string) {
+		go func(configNum, shardId int, gid int, servers []string) {
 			defer wg.Done()
 			req := &PullShardRequest{ConfigNum: configNum, ShardId: shardId}
 			resp := new(PullShardResponse)
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
 				ok := srv.Call("ShardKV.PullShard", req, resp)
-				DPrintf("{Node %v}{Group %v} send PullShardRequest %v to server %v and receives %v "+
-					"PullShardResponse %v", kv.me, kv.gid, *req, srv, ok, *resp)
+				DPrintf("{Node %v}{Group %v} send PullShardRequest %v to {Node %v}{Group %v} and receives %v "+
+					"PullShardResponse %v", kv.me, kv.gid, *req, si, gid, ok, *resp)
 				if ok && resp.Err == OK {
 					kv.propose(&SMRequest{
 						RequestType: ReqInsertShard,
@@ -355,7 +356,7 @@ func (kv *ShardKV) pullShardAction() {
 					return
 				}
 			}
-		}(kv.currentConfig.Num, shardId, servers)
+		}(kv.currentConfig.Num, shardId, gid, servers)
 	}
 	kv.mu.Unlock()
 	DPrintf("{Node %v}{Group %v} pullShardAction at here", kv.me, kv.gid)

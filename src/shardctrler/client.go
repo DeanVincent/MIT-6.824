@@ -33,6 +33,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
+func (ck *Clerk) GetClerkId() int64 {
+	return ck.clerkId
+}
+
 func (ck *Clerk) cmd(args *CmdArgs) Config {
 	for {
 		// try each known server.
