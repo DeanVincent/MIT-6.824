@@ -41,7 +41,7 @@ func (kv *ShardKV) execOp(req *OpRequest, resp *SMResponse) {
 		DPrintf("{Node %v}{Group %v} doesn't apply duplicated OpRequest %v"+
 			" because last applied operation is %v for Clerk %v", kv.me, kv.gid, *req,
 			*kv.lastApplied[req.ClerkId].Req, req.ClerkId)
-		resp.Err, resp.Value = kv.lastApplied[req.ClerkId].Resp.Err, ""
+		resp.Err, resp.Value = kv.lastApplied[req.ClerkId].Resp.Err, kv.lastApplied[req.ClerkId].Resp.Value
 		return
 	}
 	if !kv.canServe(shardId) {
