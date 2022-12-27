@@ -1,6 +1,8 @@
 package shardkv
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -25,6 +27,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 //
 func TestStaticShards(t *testing.T) {
 	fmt.Printf("Test: static shards ...\n")
+	DPrintf("Test: static shards ...\n")
 
 	cfg := make_config(t, 3, false, -1)
 	defer cfg.cleanup()
@@ -96,6 +99,7 @@ func TestStaticShards(t *testing.T) {
 
 func TestJoinLeave(t *testing.T) {
 	fmt.Printf("Test: join then leave ...\n")
+	DPrintf("Test: join then leave ...\n")
 
 	cfg := make_config(t, 3, false, -1)
 	defer cfg.cleanup()
@@ -149,6 +153,7 @@ func TestJoinLeave(t *testing.T) {
 
 func TestSnapshot(t *testing.T) {
 	fmt.Printf("Test: snapshots, join, and leave ...\n")
+	DPrintf("Test: snapshots, join, and leave ...\n")
 
 	cfg := make_config(t, 3, false, 1000)
 	defer cfg.cleanup()
@@ -217,6 +222,7 @@ func TestSnapshot(t *testing.T) {
 
 func TestMissChange(t *testing.T) {
 	fmt.Printf("Test: servers miss configuration changes...\n")
+	DPrintf("Test: servers miss configuration changes...\n")
 
 	cfg := make_config(t, 3, false, 1000)
 	defer cfg.cleanup()
@@ -303,6 +309,7 @@ func TestMissChange(t *testing.T) {
 
 func TestConcurrent1(t *testing.T) {
 	fmt.Printf("Test: concurrent puts and configuration changes...\n")
+	DPrintf("Test: concurrent puts and configuration changes...\n")
 
 	cfg := make_config(t, 3, false, 100)
 	defer cfg.cleanup()
@@ -384,6 +391,7 @@ func TestConcurrent1(t *testing.T) {
 //
 func TestConcurrent2(t *testing.T) {
 	fmt.Printf("Test: more concurrent puts and configuration changes...\n")
+	DPrintf("Test: more concurrent puts and configuration changes...\n")
 
 	cfg := make_config(t, 3, false, -1)
 	defer cfg.cleanup()
@@ -455,6 +463,7 @@ func TestConcurrent2(t *testing.T) {
 
 func TestConcurrent3(t *testing.T) {
 	fmt.Printf("Test: concurrent configuration change and restart...\n")
+	DPrintf("Test: concurrent configuration change and restart...\n")
 
 	cfg := make_config(t, 3, false, 300)
 	defer cfg.cleanup()
@@ -523,6 +532,7 @@ func TestConcurrent3(t *testing.T) {
 
 func TestUnreliable1(t *testing.T) {
 	fmt.Printf("Test: unreliable 1...\n")
+	DPrintf("Test: unreliable 1...\n")
 
 	cfg := make_config(t, 3, true, 100)
 	defer cfg.cleanup()
@@ -565,6 +575,7 @@ func TestUnreliable1(t *testing.T) {
 
 func TestUnreliable2(t *testing.T) {
 	fmt.Printf("Test: unreliable 2...\n")
+	DPrintf("Test: unreliable 2...\n")
 
 	cfg := make_config(t, 3, true, 100)
 	defer cfg.cleanup()
@@ -628,11 +639,12 @@ func TestUnreliable2(t *testing.T) {
 
 func TestUnreliable3(t *testing.T) {
 	fmt.Printf("Test: unreliable 3...\n")
+	DPrintf("Test: unreliable 3...\n")
 
 	cfg := make_config(t, 3, true, 100)
 	defer cfg.cleanup()
 
-	begin := time.Now()
+	//begin := time.Now()
 	var operations []porcupine.Operation
 	var opMu sync.Mutex
 
@@ -646,9 +658,11 @@ func TestUnreliable3(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ka[i] = strconv.Itoa(i) // ensure multiple shards
 		va[i] = randstring(5)
-		start := int64(time.Since(begin))
+		//start := int64(time.Since(begin))
+		start := time.Now()
 		ck.Put(ka[i], va[i])
-		end := int64(time.Since(begin))
+		//end := int64(time.Since(begin))
+		end := time.Now()
 		inp := models.KvInput{Op: 1, Key: ka[i], Value: va[i]}
 		var out models.KvOutput
 		op := porcupine.Operation{Input: inp, Call: start, Output: out, Return: end, ClientId: 0}
@@ -666,7 +680,9 @@ func TestUnreliable3(t *testing.T) {
 			nv := randstring(5)
 			var inp models.KvInput
 			var out models.KvOutput
-			start := int64(time.Since(begin))
+			//start := int64(time.Since(begin))
+			start := time.Now()
+
 			if (rand.Int() % 1000) < 500 {
 				ck1.Append(ka[ki], nv)
 				inp = models.KvInput{Op: 2, Key: ka[ki], Value: nv}
@@ -678,7 +694,8 @@ func TestUnreliable3(t *testing.T) {
 				inp = models.KvInput{Op: 0, Key: ka[ki]}
 				out = models.KvOutput{Value: v}
 			}
-			end := int64(time.Since(begin))
+			//end := int64(time.Since(begin))
+			end := time.Now()
 			op := porcupine.Operation{Input: inp, Call: start, Output: out, Return: end, ClientId: i}
 			opMu.Lock()
 			operations = append(operations, op)
@@ -737,6 +754,7 @@ func TestUnreliable3(t *testing.T) {
 //
 func TestChallenge1Delete(t *testing.T) {
 	fmt.Printf("Test: shard deletion (challenge 1) ...\n")
+	DPrintf("Test: shard deletion (challenge 1) ...\n")
 
 	// "1" means force snapshot after every log entry.
 	cfg := make_config(t, 3, false, 1)
@@ -823,6 +841,7 @@ func TestChallenge1Delete(t *testing.T) {
 //
 func TestChallenge2Unaffected(t *testing.T) {
 	fmt.Printf("Test: unaffected shard access (challenge 2) ...\n")
+	DPrintf("Test: unaffected shard access (challenge 2) ...\n")
 
 	cfg := make_config(t, 3, true, 100)
 	defer cfg.cleanup()
@@ -893,6 +912,7 @@ func TestChallenge2Unaffected(t *testing.T) {
 //
 func TestChallenge2Partial(t *testing.T) {
 	fmt.Printf("Test: partial migration shard access (challenge 2) ...\n")
+	DPrintf("Test: partial migration shard access (challenge 2) ...\n")
 
 	cfg := make_config(t, 3, true, 100)
 	defer cfg.cleanup()
